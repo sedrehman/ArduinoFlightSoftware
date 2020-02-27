@@ -20,7 +20,7 @@ double rad_to_degree = (180 / 3.141592654);
 #define NO_ROLL_LOWER  1466
 #define NO_YAW_UPPER   1494
 #define NO_YAW_LOWER   1484
-#define NO_POWER       1000
+#define NO_POWER       1010
 #define MAX_POWER      1850
 
 //~~~~~~~motors~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -32,7 +32,7 @@ int gyro_x, gyro_y, gyro_z;
 int acc_x, acc_y, acc_z, acc_total_vector;
 long gyro_x_cal, gyro_y_cal, gyro_z_cal;
 long loop_timer;
-float angle_pitch_gyro, angle_roll_gyro;
+float angle_pitch_gyro, angle_roll_gyro, angle_yaw_gyro;
 float angle_roll_acc, angle_pitch_acc;
 double current_pitch, current_roll;
 
@@ -62,7 +62,6 @@ double elapsedTime;
 double roll_output, pitch_output;
 PID roll(&current_roll, &roll_output, &desired_roll, KP, KI, KD, DIRECT);
 PID pitch(&current_pitch, &pitch_output, &desired_pitch, KP, KI, KD, DIRECT);
-int print_counter = 0;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -105,12 +104,12 @@ void setup_mpu_6050_registers(){
     read_mpu_6050_data();                           
     gyro_x_cal += gyro_x;                           
     gyro_y_cal += gyro_y;                           
-    gyro_z_cal += gyro_z;                           
+    //gyro_z_cal += gyro_z;                           
     delay(3);                                       
   }
   gyro_x_cal /= 250;  //get averages
   gyro_y_cal /= 250;  
-  gyro_z_cal /= 250; 
+  //gyro_z_cal /= 250; 
 }
 
 void read_mpu_6050_data(){ 
@@ -137,36 +136,42 @@ void read_mpu_6050_data(){
 
 void get_current_mpu_values(){
   read_mpu_6050_data();
-  angle_roll_acc = atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;  //Euler's equation
-  angle_pitch_acc = atan(-1*(acc_x/16384.0)/sqrt(pow((acc_y/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;
+  angle_pitch_acc = atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;  //Euler's equation
+  angle_roll_acc = atan(-1*(acc_x/16384.0)/sqrt(pow((acc_y/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;
 
-  angle_roll_gyro = gyro_x / 131.0;
-  angle_pitch_gyro = gyro_y / 131.0;
+  angle_pitch_gyro = (gyro_x / 131.0) *(.004);
+  angle_roll_gyro = (gyro_y / 131.0) * (.004);
+  angle_yaw_gyro = (gyro_z / 131.0) * (.004);
 
   current_roll = 0.98 *(current_roll + angle_roll_gyro * elapsedTime) + 0.02* angle_roll_acc;
   current_pitch = 0.98 *(current_pitch + angle_pitch_gyro * elapsedTime) + 0.02* angle_pitch_acc;
 }
 
 void get_desired_values(){
-  desired_roll = pulseIn(8, HIGH);    //A0, roll
-  desired_pitch = pulseIn(7, HIGH);   //A1, pitch 
   throttle = pulseIn(6, HIGH);        //A2, power
-  desired_yaw = pulseIn(4, HIGH);     //A3, yaw
-
-  if(throttle < NO_POWER){
+ 
+  if(throttle <= NO_POWER){
     throttle = 1000;
+    desired_roll = 0;
+    desired_pitch = 0;
+    desired_yaw = 0;
   }else{
+    
+    desired_roll = pulseIn(8, HIGH);    //A0, roll
+    desired_pitch = pulseIn(7, HIGH);   //A1, pitch 
+    desired_yaw = pulseIn(4, HIGH);     //A3, yaw
+
     if(throttle > MAX_POWER){
       throttle = MAX_POWER;
     }
 
-    if(NO_ROLL_LOWER < desired_roll < NO_ROLL_UPPER){
+    if((NO_ROLL_LOWER < desired_roll) && ( desired_roll < NO_ROLL_UPPER )){
       desired_roll = 0;
     }else{
       desired_roll = map(desired_roll, MIN_ROLL, MAX_ROLL, -30, 30);
     }
     
-    if(NO_PITCH_LOWER < desired_pitch < NO_PITCH_UPPER){
+    if((NO_PITCH_LOWER < desired_pitch) && (desired_pitch < NO_PITCH_UPPER)){
       desired_pitch = 0;
     }else{
       desired_pitch = map(desired_pitch, MIN_PITCH, MAX_PITCH, -30, 30);
@@ -286,36 +291,6 @@ void get_pid_2(){
   }
 }
 
-void print_speed(){
-//  Serial.print("throttle:");
-//  Serial.print(throttle);
-//
-//  Serial.print(" roll:");
-//  Serial.print(desired_roll);
-//
-//  Serial.print(" pitch:");
-//  Serial.println(desired_pitch);
-
-  if((print_counter % 10) == 0){
-//    Serial.print("front left :");
-//    Serial.print(left_front_speed);
-//    Serial.print("  front right :");
-//    Serial.print(right_front_speed);
-//    Serial.print("  back left :");
-//    Serial.print(left_back_speed);
-//    Serial.print("  back right :");
-//    Serial.print(right_back_speed);   
-    Serial.print(" ~~~ current roll:");
-    Serial.print(current_roll);
-    Serial.print("  desired roll :");
-    Serial.print(desired_roll);
-    Serial.print(" ~~~ current pitch:");
-    Serial.print(current_pitch);
-    Serial.print("  desired pitch :");
-    Serial.println(desired_pitch);
-  }
-  print_counter++;
-}
 
 void setup() {
   Serial.begin(250000); 
@@ -332,16 +307,32 @@ void loop(){
   elapsedTime = (micros() - loop_timer);  //time passed in sec
   get_current_mpu_values(); //figure out current roll and current pitch
   get_desired_values(); //get controller values.
-  get_pid_2();
-  left_front.writeMicroseconds(left_front_speed);
-  left_back.writeMicroseconds(left_back_speed);
-  right_front.writeMicroseconds(right_front_speed);
-  right_back.writeMicroseconds(right_back_speed);
+  get_pid();
+//  left_front.writeMicroseconds(left_front_speed);
+//  left_back.writeMicroseconds(left_back_speed);
+//  right_front.writeMicroseconds(right_front_speed);
+//  right_back.writeMicroseconds(right_back_speed);
+
+  left_front.writeMicroseconds(throttle);
+  left_back.writeMicroseconds(throttle);
+  right_front.writeMicroseconds(throttle);
+  right_back.writeMicroseconds(throttle);
   
   roll_error_prev = roll_error;
   pitch_error_prev = pitch_error;
 
-  print_speed();
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  Serial.print("current roll:");
+  Serial.print(current_roll);
+  Serial.print(" desired roll:");
+  Serial.print(desired_roll);
+  
+  Serial.print(" ~~~current pitch:");
+  Serial.print(current_pitch);
+  Serial.print(" desired pitch:");
+  Serial.print(desired_pitch); 
+  Serial.print("\n");
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
   
   while(micros() - loop_timer < 4000);  //Wait until the loop_timer reaches 4000us (250Hz) before starting the next loop
   loop_timer = micros();   //Reset the loop timer
