@@ -3,7 +3,6 @@
 
 #include <Wire.h>
 #include <Servo.h>
-#include <PID_v1.h>
 
 double rad_to_degree = (180 / 3.141592654);
 
@@ -39,29 +38,11 @@ double current_pitch, current_roll;
 //~~~~~~~rc receiver variables~~~~~~~~~~~~~
 double desired_pitch, desired_roll, desired_yaw, throttle;
 
-//~~~~~~~PID Controller variables~~~~~~~~~~
-#define KP    1 //3.2
-#define KI  .05 //0.006
-#define KD  .25 //1.4
-float p_roll = 0;
-float i_roll = 0;
-float d_roll = 0;
-float pid_roll = 0;
-float roll_error = 0;
-float roll_error_prev = 0;
-float p_pitch = 0;
-float i_pitch = 0;
-float d_pitch = 0;
-float pid_pitch = 0;
-float pitch_error = 0;
-float pitch_error_prev = 0;
-double elapsedTime;
+//~~~~~~~pid variables~~~~~~~~~~~~~~~~~~~~~
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-double roll_output, pitch_output;
-PID roll(&current_roll, &roll_output, &desired_roll, KP, KI, KD, DIRECT);
-PID pitch(&current_pitch, &pitch_output, &desired_pitch, KP, KI, KD, DIRECT);
+double pitch_diff, roll_diff;
+double p_pitch, p_roll, i_pitch, i_roll; //p = proportional , i = integral
+double i_mem_pitch, i_mem_roll, last_diff_pitch, last_diff_roll;
 
 //~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -134,6 +115,9 @@ void read_mpu_6050_data(){
 
 }
 
+//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+
 void get_current_mpu_values(){
   read_mpu_6050_data();
   angle_pitch_acc = atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;  //Euler's equation
@@ -184,113 +168,18 @@ void get_desired_values(){
     }
   }
 }
-
+//###########################################################################################################
 void get_pid(){
-    
-  roll_error = current_roll - desired_roll;
-  pitch_error = current_pitch - desired_pitch;
-  
-  p_roll = KP * roll_error;
-  p_pitch = KP * pitch_error;
+  //current roll --- desired roll
+  //current pitch --- desired pitch
+  //pitch_diff, roll_diff;
 
-  if(-3 < roll_error < 3){
-    i_roll = i_roll + (KI * roll_error);  
-  }
-   if(-3 < pitch_error < 3){
-    i_pitch = i_pitch + (KI * pitch_error);  
-  }
-  
-  d_roll = KD *((roll_error - roll_error_prev) / elapsedTime);
-  d_pitch = KD *((pitch_error - pitch_error_prev) / elapsedTime);
-  
-  /*The final PID values is the sum of each of this 3 parts*/
-  pid_roll = p_roll + i_roll + d_roll;
-  pid_pitch = p_pitch + i_pitch + d_pitch;
+  pitch_diff = desired_pitch - current_pitch;
+  roll_diff = desired_roll - current_roll;
 
-  if(pid_roll < -1000){
-    pid_roll = -1000;
-  }
-  if(pid_roll > 1000){
-    pid_roll = 1000;
-  }
-  if(pid_pitch < -1000){
-    pid_pitch = -1000;
-  }
-  if(pid_pitch > 1000){
-    pid_pitch = 1000;
-  }
- 
-  // roll control. 
-  left_front_speed = throttle + pid_roll;
-  left_back_speed = throttle + pid_roll;
-  right_front_speed = throttle - pid_roll;
-  right_back_speed = throttle - pid_roll;
-
-  // pitch control
-  left_front_speed = throttle + pid_pitch;
-  right_front_speed = throttle + pid_pitch;
-  left_back_speed = throttle - pid_pitch;
-  right_back_speed = throttle - pid_pitch;
-  
-
-  if(left_front_speed < 1020){
-    left_front_speed = 1020;
-  }
-  if(left_front_speed > 1850){
-    left_front_speed = 1850;
-  }
-  if(right_front_speed < 1020){
-    right_front_speed = 1020;
-  }
-  if(right_front_speed > 1850){
-    right_front_speed = 1850;
-  }
-  if(left_back_speed < 1020){
-    left_back_speed = 1020;
-  }
-  if(left_back_speed > 1850){
-    left_back_speed = 1850;
-  }
-  if(right_back_speed < 1020){
-    right_back_speed = 1020;
-  }
-  if(right_back_speed > 1850){
-    right_back_speed = 1850;
-  }
+  i_mem_pitch += (
 }
-
-void get_pid_2(){
-  roll.Compute(); //roll_output
-  pitch.Compute(); //pitch_output
-  // roll control. 
-  
-  
-  if(left_front_speed < 1020){
-    left_front_speed = NO_POWER;
-  }
-  if(left_front_speed > 1850){
-    left_front_speed = 1850;
-  }
-  if(right_front_speed < 1020){
-    right_front_speed = NO_POWER;
-  }
-  if(right_front_speed > 1850){
-    right_front_speed = 1850;
-  }
-  if(left_back_speed < 1020){
-    left_back_speed = NO_POWER;
-  }
-  if(left_back_speed > 1850){
-    left_back_speed = 1850;
-  }
-  if(right_back_speed < 1020){
-    right_back_speed = NO_POWER;
-  }
-  if(right_back_speed > 1850){
-    right_back_speed = 1850;
-  }
-}
-
+//###########################################################################################################
 
 void setup() {
   Serial.begin(250000); 
