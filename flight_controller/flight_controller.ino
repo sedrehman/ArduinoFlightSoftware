@@ -5,61 +5,303 @@
 #include <Servo.h>
 
 double rad_to_degree = (180 / 3.141592654);
+unsigned long loop_timer, elapsed_time;
 
 //~~~~~~~RC in this range means no movements~~~~~~~~~~~~ upper mean upper limit, lower = lower limit
-#define MAX_PITCH      1990
-#define MAX_ROLL       1975
-#define MAX_YAW        1980
-#define MIN_PITCH       990
-#define MIN_ROLL        985
-#define MIN_YAW         995
-#define NO_PITCH_UPPER 1494
-#define NO_PITCH_LOWER 1480
-#define NO_ROLL_UPPER  1480
-#define NO_ROLL_LOWER  1466
-#define NO_YAW_UPPER   1494
-#define NO_YAW_LOWER   1484
-#define NO_POWER       1010
+#define MAX_PITCH      2000
+#define MAX_ROLL       2000
+#define MAX_YAW        2000
+#define MIN_PITCH      1000
+#define MIN_ROLL       1000
+#define MIN_YAW        1000
+#define NO_POWER       1050
 #define MAX_POWER      1850
 
 //~~~~~~~motors~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Servo right_front, right_back, left_front, left_back;
-float right_front_speed, right_back_speed, left_front_speed, left_back_speed;
+int right_front_speed, right_back_speed, left_front_speed, left_back_speed;
+int right_front_cal, right_back_cal, left_front_cal, left_back_cal;
 
 //~~~~~~~mpu 6050 variables~~~~~~~~~~~~~~~~
-int gyro_x, gyro_y, gyro_z;
-int acc_x, acc_y, acc_z, acc_total_vector;
-long gyro_x_cal, gyro_y_cal, gyro_z_cal;
-long loop_timer;
-float angle_pitch_gyro, angle_roll_gyro, angle_yaw_gyro;
-float angle_roll_acc, angle_pitch_acc;
+int gyro_x, gyro_y, gyro_z, temperature;
+int acc_x, acc_y, acc_z;
+double acc_pitch_cal, acc_roll_cal;
+double gyro_x_cal, gyro_y_cal, gyro_z_cal;
+double angle_pitch_gyro, angle_roll_gyro, angle_yaw_gyro;
+double angle_roll_acc[4], angle_pitch_acc[4];
+double acc_pitch, acc_roll;
 double current_pitch, current_roll;
-
+int i = 0;
+double mpu_d;
 //~~~~~~~rc receiver variables~~~~~~~~~~~~~
-double desired_pitch, desired_roll, desired_yaw, throttle;
+volatile int rc_values[4];
+byte ch1, ch2, ch3, ch4;
+unsigned long timer_1, timer_2, timer_3, timer_4, current_time ;
+int throttle, desired_pitch, desired_roll, desired_yaw;
 
 //~~~~~~~pid variables~~~~~~~~~~~~~~~~~~~~~
+#define I_CONST 1
+#define P_CONST 1
+#define D_CONST 1
+#define MAX_PITCH_CHANGE 50
+#define MIN_PITCH_CHANGE -50
+#define MAX_ROLL_CHANGE 50
+#define MIN_ROLL_CHANGE -50
 
 double pitch_diff, roll_diff;
 double p_pitch, p_roll, i_pitch, i_roll; //p = proportional , i = integral
 double i_mem_pitch, i_mem_roll, last_diff_pitch, last_diff_roll;
+double pitch_output, roll_output;
 
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-void setup_rc_reciever(){
-  //setting up pins for rc receiver 4 channels
-  pinMode(8, INPUT);
-  pinMode(7, INPUT);
-  pinMode(6, INPUT);
-  pinMode(4, INPUT);
+void setup() {
+  Serial.begin(9600);
+  Wire.begin();
+  TWBR = 12;
+  current_roll = 0;
+  current_pitch = 0;
+  setup_mpu_6050_registers();  
+
+  i_mem_pitch = 0;
+  i_mem_roll = 0;
+  last_diff_pitch = 0;
+  last_diff_roll = 0;
+  
+  /*
+  pinMode(8, INPUT);   PCINT0    roll
+  pinMode(9, INPUT);   PCINT2   pitch
+  pinMode(10, INPUT);   PCINT3   throttle
+  pinMode(11, INPUT);   PCINT4   yaw
+  */
+  cli();
+  PCICR |= (1 << PCIE0);
+  PCMSK0 |= (1 << PCINT0);
+  PCMSK0 |= (1 << PCINT1);
+  PCMSK0 |= (1 << PCINT2);
+  PCMSK0 |= (1 << PCINT3);
+  sei();
+
+  angle_pitch_gyro = 0.0;
+  angle_roll_gyro = 0.0;
+
+  setup_motors();
+
+  right_front_speed = 1000;
+  right_back_speed = 1000;
+  left_front_speed = 1000;
+  left_back_speed = 1000;
+  
+  loop_timer = micros();  //Reset the loop timer
+  Serial.println("setup done");
 }
 
-void setup_motors(){
-  right_front.attach(10, 1000, 2000);
-  right_back.attach(9, 1000, 2000);
-  left_front.attach(5, 1000, 2000);
-  left_back.attach(3, 1000, 2000);
+
+void loop(){
+  //elapsed_time = (micros() - loop_timer);
+  read_mpu_6050_data();
+  gyro_x -= gyro_x_cal;
+  gyro_y -= gyro_y_cal;
+  gyro_z -= gyro_z_cal;
+
+  angle_pitch_acc[0] = angle_pitch_acc[1];
+  angle_pitch_acc[1] = angle_pitch_acc[2];
+  angle_pitch_acc[2] = angle_pitch_acc[3];
+  angle_pitch_acc[3] = atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree - acc_pitch_cal;  //Euler's equation
+  acc_pitch = (angle_pitch_acc[0] + angle_pitch_acc[1] + angle_pitch_acc[2] + angle_pitch_acc[3]) / 4;  //using rolling avg
+
+  angle_roll_acc[0] = angle_roll_acc[1];
+  angle_roll_acc[1] = angle_roll_acc[2];
+  angle_roll_acc[2] = angle_roll_acc[3];
+  angle_roll_acc[3] = atan(-1*(acc_x/16384.0)/sqrt(pow((acc_y/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree - acc_roll_cal;
+  acc_roll = (angle_roll_acc[0] + angle_roll_acc[1] + angle_roll_acc[2] + angle_roll_acc[3]) / 4;
+
+  //mpu_d = 1 / (
+  angle_pitch_gyro += (gyro_x *0.000346);  
+  angle_roll_gyro += (gyro_y *0.000346);   
+  angle_yaw_gyro += (gyro_z *0.000346);  //.00048 @ 125hz
+
+  current_roll = (0.999 *angle_roll_gyro) + (0.001* acc_roll);
+  current_pitch = (0.999 *angle_pitch_gyro) + (0.001* acc_pitch);
+
+  if(throttle == 1000 || ((current_pitch < 2 && current_pitch > -2) && (acc_pitch > -.02 && acc_pitch < .02))){
+    angle_pitch_gyro = acc_pitch;
+    current_pitch = acc_pitch;
+  }
+  if(throttle == 1000 || ((current_roll < 2 && current_roll > -2) && (acc_roll > -.02 && acc_roll < .02))){
+    angle_roll_gyro = acc_roll;
+    current_roll = acc_roll;
+  }
+
+  //If the IMU has yawed transfer the roll angle to the pitch angle
+  current_pitch += current_roll * sin(gyro_z * 0.000001066);
+  //If the IMU has yawed transfer the pitch angle to the roll angle               
+  current_roll -= current_pitch * sin(gyro_z * 0.000001066);        
   
+  get_desired_values();
+  
+  if(throttle < 1050){
+    right_front_speed = 1000;
+    right_back_speed = 1000;
+    left_front_speed = 1000;
+    left_back_speed = 1000;
+    Serial.print("~");
+  }else{
+    get_pid();
+    Serial.print(current_roll);
+    Serial.print("  output:");
+    Serial.println(left_front_speed);
+  }
+  left_front.writeMicroseconds(left_front_speed);
+  left_back.writeMicroseconds(left_back_speed);
+  right_front.writeMicroseconds(right_front_speed);
+  right_back.writeMicroseconds(right_back_speed);
+ 
+
+
+  
+// Serial.println(elapsed_time);
+  while(elapsed_time < 8000){
+    elapsed_time = micros() - loop_timer;
+  }
+  loop_timer = micros();
+}
+
+//###########################################################################################################
+void get_pid(){
+  right_front_speed = throttle;
+  right_back_speed = throttle;
+  left_front_speed = throttle;
+  left_back_speed = throttle;
+  //~~~~~~~~~~~~~~~~~~~~~~~~~~pitch ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  pitch_diff = current_pitch - desired_pitch;
+  i_mem_pitch += (I_CONST * pitch_diff);
+  
+  if( i_mem_pitch > MAX_PITCH_CHANGE){
+    i_mem_pitch = MAX_PITCH_CHANGE;
+  }
+  if( i_mem_pitch < MIN_PITCH_CHANGE ){
+    i_mem_pitch = MIN_PITCH_CHANGE;
+  }
+  pitch_output = (P_CONST * pitch_diff) + (D_CONST * (pitch_diff - last_diff_pitch)) + i_mem_pitch;
+  last_diff_pitch = pitch_diff;
+
+  //~~~~~~~~~~~~~~~~~~~~~~~~~roll ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  roll_diff = desired_roll - current_roll;
+  i_mem_roll += (I_CONST * roll_diff);
+  
+  if( i_mem_roll > MAX_ROLL_CHANGE){
+    i_mem_roll = MAX_ROLL_CHANGE;
+  }
+  if( i_mem_roll < MIN_ROLL_CHANGE ){
+    i_mem_roll = MIN_ROLL_CHANGE;
+  }
+  roll_output = (P_CONST * roll_diff) + (D_CONST * (roll_diff - last_diff_roll)) + i_mem_roll;
+  last_diff_roll = roll_diff;
+
+  //+++++++++++++++++++++++++++++++++++++++motor control++++++++++++++++++++++++++++++++++++++++++++++++++++
+  if(pitch_output > 2){
+    right_back_speed = throttle + pitch_output;
+    left_back_speed = throttle + pitch_output;
+    if(right_back_speed > MAX_PITCH){ right_back_speed = MAX_PITCH; }
+    if(left_back_speed > MAX_PITCH){ left_back_speed = MAX_PITCH; }
+  }
+  if(pitch_output < -2){
+    right_front_speed = throttle + (-1* pitch_output);
+    left_front_speed = throttle + (-1* pitch_output);
+    if(right_front_speed > MAX_PITCH){ right_front_speed = MAX_PITCH; }
+    if(left_front_speed > MAX_PITCH){ left_front_speed = MAX_PITCH; }
+  }
+
+  if(roll_output < -2){
+    right_front_speed = throttle + (-1* roll_output);
+    right_back_speed = throttle + (-1* roll_output);
+    if(right_front_speed > MAX_PITCH){ right_front_speed = MAX_PITCH; }
+    if(right_back_speed > MAX_PITCH){ right_back_speed = MAX_PITCH; }
+  }
+  if(roll_output > 2){
+    left_front_speed = throttle + roll_output;
+    left_back_speed = throttle + roll_output;
+    if(left_front_speed > MAX_PITCH){ left_front_speed = MAX_PITCH; }
+    if(left_back_speed > MAX_PITCH){ left_back_speed = MAX_PITCH; }
+  }
+}
+//###########################################################################################################
+/*
+pinMode(8, INPUT);   PCINT0    roll
+pinMode(9, INPUT);   PCINT23   pitch
+pinMode(10, INPUT);   PCINT22   throttle
+pinMode(11, INPUT);   PCINT20   yaw
+*/
+ISR(PCINT0_vect){
+  current_time = micros();
+  if(PINB & B00000001){  
+    if(ch1 == 0){         
+      ch1 = 1;                 
+      timer_1 = current_time;             
+    }
+  }
+  else if(ch1 == 1){   
+    ch1 = 0;                           
+    rc_values[0] = current_time - timer_1;   
+  } 
+
+  
+  if(PINB & B00000010){  
+    if(ch2 == 0){ 
+      ch2 = 1;  
+      timer_2 = current_time; 
+    }
+  }
+  else if(ch2 == 1){     
+    ch2 = 0; 
+    rc_values[1] = current_time - timer_2;
+  }
+
+  
+  if(PINB & B00000100){  
+    if(ch3 == 0){
+      ch3 = 1; 
+      timer_3 = current_time; 
+    }
+  }
+  else if(ch3 == 1){ 
+    ch3 = 0;   
+    rc_values[2] = current_time - timer_3;  
+  }
+  
+  
+  if(PINB & B00001000){ 
+    if(ch4 == 0){     
+      ch4 = 1;   
+      timer_4 = current_time; 
+    }
+  }
+  else if(ch4 == 1){   
+    ch4 = 0; 
+    rc_values[3] = current_time - timer_4;
+  } 
+  
+}
+
+void read_mpu_6050_data(){ 
+  //Subroutine for reading the raw gyro , accelerometer data and temperature
+  Wire.beginTransmission(0x68);  //Start communicating with the MPU-6050
+  Wire.write(0x3B);  //Send the requested starting register
+  Wire.endTransmission(false); 
+  Wire.requestFrom(0x68,6,true);  //Request 6 bytes from the MPU-6050
+  acc_x = Wire.read()<<8|Wire.read();    //Add the low and high byte to the acc_* variable
+  acc_y = Wire.read()<<8|Wire.read();    
+  acc_z = Wire.read()<<8|Wire.read();    
+
+
+  Wire.beginTransmission(0x68);
+  Wire.write(0x43);     //Gyro data first address
+  Wire.endTransmission(false);
+  Wire.requestFrom(0x68,6,true); 
+   
+  gyro_x = Wire.read()<<8|Wire.read();   //Add the low and high byte to the gyro_* variable
+  gyro_y = Wire.read()<<8|Wire.read();   
+  gyro_z = Wire.read()<<8|Wire.read();  
 }
 
 void setup_mpu_6050_registers(){
@@ -80,149 +322,57 @@ void setup_mpu_6050_registers(){
   Wire.write(0x08);  
   Wire.endTransmission();
 
-  //Run this code 4 sec for calibration.
-  for (int i = 0; i < 250 ; i++){   
+  //accel calibration.
+  for (i = 0; i < 800 ; i++){   
+    read_mpu_6050_data();                           
+    acc_pitch_cal += atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree ;  //Euler's equation
+    acc_roll_cal += atan(-1*(acc_x/16384.0)/sqrt(pow((acc_y/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree ;                         
+    delayMicroseconds(8000);                                     
+  }
+  acc_pitch_cal /= 800;
+  acc_roll_cal /= 800;
+  Serial.print("accel cal pitch:");
+  Serial.print(acc_pitch_cal);
+  Serial.print("  roll:");
+  Serial.print(acc_roll_cal);
+
+  //gyro calibration.
+  for (i = 0; i < 800 ; i++){   
     read_mpu_6050_data();                           
     gyro_x_cal += gyro_x;                           
     gyro_y_cal += gyro_y;                           
-    //gyro_z_cal += gyro_z;                           
-    delay(3);                                       
+    gyro_z_cal += gyro_z;                           
+    delayMicroseconds(8000);                                     
   }
-  gyro_x_cal /= 250;  //get averages
-  gyro_y_cal /= 250;  
-  //gyro_z_cal /= 250; 
-}
-
-void read_mpu_6050_data(){ 
-  //Subroutine for reading the raw gyro , accelerometer data and temperature
-  Wire.beginTransmission(0x68);  //Start communicating with the MPU-6050
-  Wire.write(0x3B);  //Send the requested starting register
-  Wire.endTransmission(false); 
-  Wire.requestFrom(0x68,6,true);  //Request 6 bytes from the MPU-6050
-  acc_x = Wire.read()<<8|Wire.read();    //Add the low and high byte to the acc_* variable
-  acc_y = Wire.read()<<8|Wire.read();    
-  acc_z = Wire.read()<<8|Wire.read();    
-
-
-  Wire.beginTransmission(0x68);
-  Wire.write(0x43);     //Gyro data first address
-  Wire.endTransmission(false);
-  Wire.requestFrom(0x68,4,true); //Just 4 registers
-   
-  gyro_x = Wire.read()<<8|Wire.read();   //Add the low and high byte to the gyro_* variable
-  gyro_y = Wire.read()<<8|Wire.read();   
-  gyro_z = Wire.read()<<8|Wire.read();  
-
-}
-
-//~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-
-void get_current_mpu_values(){
-  read_mpu_6050_data();
-  angle_pitch_acc = atan((acc_y /16384.0)/sqrt(pow((acc_x/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;  //Euler's equation
-  angle_roll_acc = atan(-1*(acc_x/16384.0)/sqrt(pow((acc_y/16384.0),2) + pow((acc_z/16384.0),2)))*rad_to_degree;
-
-  angle_pitch_gyro = (gyro_x / 131.0) *(.004);
-  angle_roll_gyro = (gyro_y / 131.0) * (.004);
-  angle_yaw_gyro = (gyro_z / 131.0) * (.004);
-
-  current_roll = 0.98 *(current_roll + angle_roll_gyro * elapsedTime) + 0.02* angle_roll_acc;
-  current_pitch = 0.98 *(current_pitch + angle_pitch_gyro * elapsedTime) + 0.02* angle_pitch_acc;
+  gyro_x_cal /= 800;  //get averages
+  gyro_y_cal /= 800;  
+  gyro_z_cal /= 800;
 }
 
 void get_desired_values(){
-  throttle = pulseIn(6, HIGH);        //A2, power
- 
+  desired_yaw = rc_values[0];
+  throttle = rc_values[1];
+  desired_pitch = rc_values[2];
+  desired_roll = rc_values[3];
+  
   if(throttle <= NO_POWER){
     throttle = 1000;
     desired_roll = 0;
     desired_pitch = 0;
     desired_yaw = 0;
   }else{
-    
-    desired_roll = pulseIn(8, HIGH);    //A0, roll
-    desired_pitch = pulseIn(7, HIGH);   //A1, pitch 
-    desired_yaw = pulseIn(4, HIGH);     //A3, yaw
-
     if(throttle > MAX_POWER){
       throttle = MAX_POWER;
     }
-
-    if((NO_ROLL_LOWER < desired_roll) && ( desired_roll < NO_ROLL_UPPER )){
-      desired_roll = 0;
-    }else{
-      desired_roll = map(desired_roll, MIN_ROLL, MAX_ROLL, -30, 30);
-    }
-    
-    if((NO_PITCH_LOWER < desired_pitch) && (desired_pitch < NO_PITCH_UPPER)){
-      desired_pitch = 0;
-    }else{
-      desired_pitch = map(desired_pitch, MIN_PITCH, MAX_PITCH, -30, 30);
-    }
-    
-    if((NO_YAW_LOWER < desired_yaw) &&  (desired_yaw < NO_YAW_UPPER)){
-      desired_yaw = 0;
-    }else{
-      desired_yaw = map(desired_yaw, MIN_YAW, MAX_YAW, -5, 5);
-    }
+    desired_roll = map(desired_roll, MIN_ROLL, MAX_ROLL, -30, 30);
+    desired_pitch = map(desired_pitch, MIN_PITCH, MAX_PITCH, -30, 30);
+    desired_yaw = map(desired_yaw, MIN_YAW, MAX_YAW, -30, 30);
   }
 }
-//###########################################################################################################
-void get_pid(){
-  //current roll --- desired roll
-  //current pitch --- desired pitch
-  //pitch_diff, roll_diff;
 
-  pitch_diff = desired_pitch - current_pitch;
-  roll_diff = desired_roll - current_roll;
-
-  i_mem_pitch += (
-}
-//###########################################################################################################
-
-void setup() {
-  Serial.begin(250000); 
-  setup_rc_reciever();
-  setup_mpu_6050_registers();  
-  setup_motors();
-  roll.SetMode(AUTOMATIC);
-  pitch.SetMode(AUTOMATIC);
-  loop_timer = micros();  //Reset the loop timer
-  Serial.println("setup done");
-}
-
-void loop(){
-  elapsedTime = (micros() - loop_timer);  //time passed in sec
-  get_current_mpu_values(); //figure out current roll and current pitch
-  get_desired_values(); //get controller values.
-  get_pid();
-//  left_front.writeMicroseconds(left_front_speed);
-//  left_back.writeMicroseconds(left_back_speed);
-//  right_front.writeMicroseconds(right_front_speed);
-//  right_back.writeMicroseconds(right_back_speed);
-
-  left_front.writeMicroseconds(throttle);
-  left_back.writeMicroseconds(throttle);
-  right_front.writeMicroseconds(throttle);
-  right_back.writeMicroseconds(throttle);
-  
-  roll_error_prev = roll_error;
-  pitch_error_prev = pitch_error;
-
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-  Serial.print("current roll:");
-  Serial.print(current_roll);
-  Serial.print(" desired roll:");
-  Serial.print(desired_roll);
-  
-  Serial.print(" ~~~current pitch:");
-  Serial.print(current_pitch);
-  Serial.print(" desired pitch:");
-  Serial.print(desired_pitch); 
-  Serial.print("\n");
-//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-  
-  while(micros() - loop_timer < 4000);  //Wait until the loop_timer reaches 4000us (250Hz) before starting the next loop
-  loop_timer = micros();   //Reset the loop timer
+void setup_motors(){
+  right_front.attach(7, 1000, 2000);
+  right_back.attach(6, 1000, 2000);
+  left_front.attach(5, 1000, 2000);
+  left_back.attach(3, 1000, 2000);
 }
